@@ -1,0 +1,42 @@
+# k210/stereo_lcd_wifi/config.py
+
+# --- Camera/LCD ---
+USE_LCD = True
+FRAME_SIZE = "QVGA"  # "QQVGA" / "QVGA" / "VGA"
+PIXFORMAT = "RGB565"  # "RGB565" or "GRAYSCALE"
+SWITCH_MS = 120  # preview switch interval (LCD)
+
+# --- WiFi stream ---
+WIFI_ENABLE = True
+WIFI_SSID = "YOUR_SSID"
+WIFI_PASS = "YOUR_PASSWORD"
+
+# HTTP server endpoint on your PC (same LAN)
+# Example: http://192.168.1.100:5005/upload
+SERVER_URL = "http://192.168.1.100:5005/upload"
+
+# JPEG settings
+JPEG_QUALITY = 70  # 10..95 (higher = better quality/larger)
+STREAM_INTERVAL_MS = 150  # upload every N ms (tune for bandwidth)
+
+# If True, send one stitched image (Left|Right). Recommended.
+STITCH_LR = True
+
+# Add a simple increasing frame id in header
+SEND_FRAME_ID = True
+
+# --- ESP32 SPI network (MaixPy variants)
+# Different MaixPy builds expose different APIs.
+# We'll try several in code; set these pins if your build needs them.
+
+# If your firmware supports auto ESP32 init, you can ignore these.
+ESP32_SPI_PINS = {
+    # These names are common; adjust if your board wiring differs.
+    # Some MaixDuino boards already have fixed wiring in firmware.
+    "cs": 10,
+    "rst": 11,
+    "rdy": 12,
+    "mosi": 13,
+    "miso": 14,
+    "sclk": 15,
+}
