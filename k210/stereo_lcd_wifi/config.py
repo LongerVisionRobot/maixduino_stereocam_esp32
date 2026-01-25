@@ -8,8 +8,8 @@ SWITCH_MS = 120  # preview switch interval (LCD)
 
 # --- WiFi stream ---
 WIFI_ENABLE = True
-WIFI_SSID = "YOUR_SSID"
-WIFI_PASS = "YOUR_PASSWORD"
+WIFI_SSID = "MYSSID"
+WIFI_PASS = "MYPASSWD"
 
 # HTTP server endpoint on your PC (same LAN)
 # Example: http://192.168.1.100:5005/upload
@@ -30,13 +30,9 @@ SEND_FRAME_ID = True
 # We'll try several in code; set these pins if your build needs them.
 
 # If your firmware supports auto ESP32 init, you can ignore these.
-ESP32_SPI_PINS = {
-    # These names are common; adjust if your board wiring differs.
-    # Some MaixDuino boards already have fixed wiring in firmware.
-    "cs": 10,
-    "rst": 11,
-    "rdy": 12,
-    "mosi": 13,
-    "miso": 14,
-    "sclk": 15,
+ESP32_SPI = {
+    "fpioa": {"cs": 25, "rst": 8, "rdy": 9, "mosi": 28, "miso": 26, "sclk": 27},
+    "gpiohs": {"cs": 10, "rst": 11, "rdy": 12, "mosi": 13, "miso": 14, "sclk": 15},
+    "spi": -1,
+    "timeout_ms": 20000,
 }
