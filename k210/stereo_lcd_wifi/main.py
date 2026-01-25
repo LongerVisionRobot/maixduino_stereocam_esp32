@@ -1,4 +1,3 @@
-# k210/stereo_lcd_wifi/main.py
 import time
 import sensor
 import image
@@ -11,9 +10,6 @@ except Exception:
 import config
 
 
-# -------------------------
-# Helpers: config parsing
-# -------------------------
 def _framesize_from_str(s):
     s = str(s).upper().strip()
     if s == "QQVGA":
@@ -34,9 +30,6 @@ def _pixformat_from_str(s):
     return sensor.RGB565
 
 
-# -------------------------
-# LCD (safe)
-# -------------------------
 def lcd_ok():
     return (lcd is not None) and getattr(config, "USE_LCD", True)
 
@@ -60,20 +53,17 @@ def init_lcd():
         try:
             try:
                 lcd.deinit()
-                time.sleep_ms(50)
+                time.sleep_ms(60)
             except Exception:
                 pass
             lcd.init()
             lcd_msg("LCD OK", 0)
             return True
         except Exception:
-            time.sleep_ms(200)
+            time.sleep_ms(250)
     return False
 
 
-# -------------------------
-# Binocular camera init
-# -------------------------
 def _config_one_side():
     sensor.set_pixformat(_pixformat_from_str(config.PIXFORMAT))
     sensor.set_framesize(_framesize_from_str(config.FRAME_SIZE))
@@ -95,12 +85,12 @@ def _config_one_side():
 def init_binocular(warmup_pairs=15):
     try:
         sensor.reset()
-        time.sleep_ms(50)
+        time.sleep_ms(80)
     except Exception:
         pass
 
     sensor.binocular_reset()
-    time.sleep_ms(80)
+    time.sleep_ms(120)
 
     sensor.shutdown(False)
     _config_one_side()
@@ -109,7 +99,7 @@ def init_binocular(warmup_pairs=15):
     _config_one_side()
 
     sensor.run(1)
-    time.sleep_ms(50)
+    time.sleep_ms(80)
 
     for _ in range(warmup_pairs):
         try:
@@ -135,123 +125,84 @@ def capture_right():
     return sensor.snapshot()
 
 
-# -------------------------
-# WiFi bring-up (ESP32)
-# -------------------------
 def wifi_connect():
-    if not getattr(config, "WIFI_ENABLE", True):
-        return None
+    import network
+    from fpioa_manager import fm
+
+    time.sleep_ms(1200)
+
+    fm.register(25, fm.fpioa.GPIOHS10)
+    fm.register(8, fm.fpioa.GPIOHS11)
+    fm.register(9, fm.fpioa.GPIOHS12)
+    fm.register(28, fm.fpioa.GPIOHS13)
+    fm.register(26, fm.fpioa.GPIOHS14)
+    fm.register(27, fm.fpioa.GPIOHS15)
+
+    print("pinmap OK")
 
     ssid = getattr(config, "WIFI_SSID", "")
     pwd = getattr(config, "WIFI_PASS", "")
     if not ssid:
-        print("[WIFI] SSID empty, skip.")
+        print("[WIFI] SSID empty")
         return None
 
-    try:
-        import network
-        from fpioa_manager import fm
+    nic = None
+    last_err = None
 
-        esp = getattr(config, "ESP32_SPI", None)
-        if esp is None:
-            raise Exception("ESP32_SPI missing in config")
-
-        fp = esp.get("fpioa", {})
-        gh = esp.get("gpiohs", {})
-        spi_mode = int(esp.get("spi", -1))
-        timeout_ms = int(esp.get("timeout_ms", 20000))
-
-        fm.register(
-            int(fp.get("cs", 25)), getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("cs", 10)))
-        )
-        fm.register(
-            int(fp.get("rst", 8)),
-            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rst", 11))),
-        )
-        fm.register(
-            int(fp.get("rdy", 9)),
-            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rdy", 12))),
-        )
-        fm.register(
-            int(fp.get("mosi", 28)),
-            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("mosi", 13))),
-        )
-        fm.register(
-            int(fp.get("miso", 26)),
-            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("miso", 14))),
-        )
-        fm.register(
-            int(fp.get("sclk", 27)),
-            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("sclk", 15))),
-        )
-
-        cs_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("cs", 10)))
-        rst_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rst", 11)))
-        rdy_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rdy", 12)))
-        mosi_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("mosi", 13)))
-        miso_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("miso", 14)))
-        sclk_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("sclk", 15)))
-
-        nic = network.ESP32_SPI(
-            cs=cs_f,
-            rst=rst_f,
-            rdy=rdy_f,
-            mosi=mosi_f,
-            miso=miso_f,
-            sclk=sclk_f,
-            spi=spi_mode,
-        )
-
-        print("[WIFI] fw:", nic.version())
-        print("[WIFI] scanning...")
+    for _ in range(3):
         try:
-            print(nic.scan())
+            nic = network.ESP32_SPI(
+                cs=fm.fpioa.GPIOHS10,
+                rst=fm.fpioa.GPIOHS11,
+                rdy=fm.fpioa.GPIOHS12,
+                mosi=fm.fpioa.GPIOHS13,
+                miso=fm.fpioa.GPIOHS14,
+                sclk=fm.fpioa.GPIOHS15,
+                spi=-1,
+            )
+            break
         except Exception as e:
-            print("[WIFI] scan fail:", e)
+            last_err = e
+            print("[WIFI] ESP32_SPI create failed:", e)
+            time.sleep_ms(900)
 
-        print("[WIFI] connecting...")
-        nic.connect(ssid=ssid, key=pwd)
+    if nic is None:
+        print("[WIFI] ESP32_SPI unavailable:", last_err)
+        return None
 
-        t0 = time.ticks_ms()
-        while not nic.isconnected():
-            if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
-                raise Exception("connect timeout")
-            time.sleep_ms(200)
-
-        try:
-            print("[WIFI] connected:", nic.ifconfig())
-        except Exception:
-            print("[WIFI] connected")
-        return nic
-
+    print("ESP32_SPI object created")
+    try:
+        print("ESP32 FW:", nic.version())
     except Exception as e:
-        print("[WIFI] network.ESP32_SPI failed:", e)
+        print("[WIFI] version fail:", e)
 
     try:
-        import maix
-
-        print("[WIFI] connecting (maix.ESP32_Network)...")
-        nic = maix.ESP32_Network()
-        nic.connect(ssid, pwd)
-
-        t0 = time.ticks_ms()
-        while not nic.isconnected():
-            if time.ticks_diff(time.ticks_ms(), t0) > 20000:
-                raise Exception("connect timeout")
-            time.sleep_ms(200)
-
-        print("[WIFI] connected")
-        return nic
+        aps = nic.scan()
+        print("APs:", aps)
     except Exception as e:
-        print("[WIFI] maix.ESP32_Network failed:", e)
+        print("[WIFI] scan fail:", e)
 
-    print("[WIFI] no supported WiFi API in this MaixPy build.")
-    return None
+    try:
+        nic.connect(ssid=ssid, key=pwd)
+    except Exception as e:
+        print("[WIFI] connect call fail:", e)
+        return None
+
+    t0 = time.ticks_ms()
+    while not nic.isconnected():
+        time.sleep_ms(200)
+        if time.ticks_diff(time.ticks_ms(), t0) > 20000:
+            print("[WIFI] connect timeout")
+            return None
+
+    try:
+        print("IP:", nic.ifconfig())
+    except Exception as e:
+        print("[WIFI] ifconfig fail:", e)
+
+    return nic
 
 
-# -------------------------
-# JPEG + stitch
-# -------------------------
 def _jpeg_bytes(img, quality):
     if hasattr(img, "compress"):
         return img.compress(quality=quality)
@@ -269,11 +220,7 @@ def stitch_lr(imgL, imgR):
     return out
 
 
-# -------------------------
-# Socket-only HTTP client (NO urequests needed)
-# -------------------------
 def _parse_http_url(url):
-    # supports: http://host:port/path  or http://host/path
     if not url.startswith("http://"):
         raise ValueError("Only http:// is supported")
     tmp = url[len("http://") :]
@@ -282,7 +229,6 @@ def _parse_http_url(url):
         path = "/" + path
     else:
         hostport, path = tmp, "/"
-
     if ":" in hostport:
         host, port = hostport.split(":", 1)
         port = int(port)
@@ -292,7 +238,6 @@ def _parse_http_url(url):
 
 
 def http_get_raw(url, timeout_s=4):
-    # minimal GET for /ping debug
     import usocket as socket
 
     host, port, path = _parse_http_url(url)
@@ -306,8 +251,6 @@ def http_get_raw(url, timeout_s=4):
         port,
     )
     s.send(req.encode())
-
-    # read a bit (status line)
     data = s.recv(64)
     s.close()
     return data
@@ -326,10 +269,11 @@ def http_post_jpeg_socket(jpeg, frame_id=None):
         print("[HTTP] bad SERVER_URL:", e)
         return False
 
+    s = None
     try:
         addr = socket.getaddrinfo(host, port)[0][-1]
         s = socket.socket()
-        s.settimeout(6)
+        s.settimeout(8)
         s.connect(addr)
 
         hdr = ""
@@ -345,11 +289,10 @@ def http_post_jpeg_socket(jpeg, frame_id=None):
         s.send(hdr.encode())
         s.send(jpeg)
 
-        # Read first chunk including status line
         resp = s.recv(96)
         s.close()
+        s = None
 
-        # crude but effective
         if b" 200 " in resp or b" 201 " in resp:
             return True
 
@@ -358,7 +301,8 @@ def http_post_jpeg_socket(jpeg, frame_id=None):
 
     except Exception as e:
         try:
-            s.close()
+            if s:
+                s.close()
         except Exception:
             pass
         print("[HTTP] POST failed:", e)
@@ -366,13 +310,12 @@ def http_post_jpeg_socket(jpeg, frame_id=None):
 
 
 def main():
-    time.sleep_ms(300)
+    time.sleep_ms(350)
     print("=== MaixPy Stereo LCD + WiFi Stream (socket) ===")
 
     if getattr(config, "USE_LCD", True):
         init_lcd()
 
-    # Camera init
     try:
         init_binocular()
     except Exception as e:
@@ -381,23 +324,25 @@ def main():
         while True:
             time.sleep_ms(1000)
 
-    # WiFi init
+    time.sleep_ms(1000)
+
     nic = None
     if getattr(config, "WIFI_ENABLE", True):
-        nic = wifi_connect()
+        try:
+            nic = wifi_connect()
+        except Exception as e:
+            print("[WIFI] fatal:", e)
+            nic = None
+
         if nic is None:
             lcd_msg("WIFI FAIL", 24)
         else:
             lcd_msg("WIFI OK", 24)
 
-    # Probe PC server (optional but recommended)
-    # Requires you added /ping in Flask.
     if nic is not None:
         try:
-            probe_url = "http://%s:%d/ping" % (
-                _parse_http_url(config.SERVER_URL)[0],
-                _parse_http_url(config.SERVER_URL)[1],
-            )
+            host, port, _ = _parse_http_url(config.SERVER_URL)
+            probe_url = "http://%s:%d/ping" % (host, port)
             resp = http_get_raw(probe_url)
             print("[PROBE] resp:", resp)
             lcd_msg("PING OK" if b"200" in resp else "PING BAD", 24)
@@ -407,10 +352,9 @@ def main():
 
     frame_id = 0
     last_send = time.ticks_ms()
-
-    # If your WiFi is shaky, start conservative
     interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 600))
     q = int(getattr(config, "JPEG_QUALITY", 60))
+    switch_ms = int(getattr(config, "SWITCH_MS", 120))
 
     while True:
         try:
@@ -418,24 +362,24 @@ def main():
             if lcd_ok():
                 lcd.display(imgL)
                 lcd_msg("L", 0)
-            time.sleep_ms(int(getattr(config, "SWITCH_MS", 120)))
+            time.sleep_ms(switch_ms)
 
             imgR = capture_right()
             if lcd_ok():
                 lcd.display(imgR)
                 lcd_msg("R", 0)
-            time.sleep_ms(int(getattr(config, "SWITCH_MS", 120)))
+            time.sleep_ms(switch_ms)
 
             if nic is not None and getattr(config, "WIFI_ENABLE", True):
                 now = time.ticks_ms()
                 if time.ticks_diff(now, last_send) >= interval_ms:
                     last_send = now
 
-                    img = (
-                        stitch_lr(imgL, imgR)
-                        if getattr(config, "STITCH_LR", True)
-                        else imgL
-                    )
+                    if getattr(config, "STITCH_LR", True):
+                        img = stitch_lr(imgL, imgR)
+                    else:
+                        img = imgL
+
                     jpeg = _jpeg_bytes(img, q)
 
                     ok = http_post_jpeg_socket(jpeg, frame_id=frame_id)
@@ -451,7 +395,7 @@ def main():
             print("[LOOP] error:", e)
             if lcd_ok():
                 lcd_msg("LOOP ERR", 24)
-            time.sleep_ms(200)
+            time.sleep_ms(300)
             try:
                 init_binocular(warmup_pairs=8)
                 if lcd_ok():
