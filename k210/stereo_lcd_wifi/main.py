@@ -128,17 +128,24 @@ def capture_right():
 def wifi_connect():
     import network
     from fpioa_manager import fm
+    import time
 
     time.sleep_ms(1200)
 
-    fm.register(25, fm.fpioa.GPIOHS10)
-    fm.register(8, fm.fpioa.GPIOHS11)
-    fm.register(9, fm.fpioa.GPIOHS12)
-    fm.register(28, fm.fpioa.GPIOHS13)
-    fm.register(26, fm.fpioa.GPIOHS14)
-    fm.register(27, fm.fpioa.GPIOHS15)
+    # --- Use config mapping (recommended) ---
+    fpioa = config.ESP32_SPI.get("fpioa", {})
+    gpiohs = config.ESP32_SPI.get("gpiohs", {})
+    spi_id = config.ESP32_SPI.get("spi", -1)
 
-    print("pinmap OK")
+    # Map board pins -> GPIOHS functions
+    fm.register(fpioa["cs"], fm.fpioa.GPIOHS0 + gpiohs["cs"])
+    fm.register(fpioa["rst"], fm.fpioa.GPIOHS0 + gpiohs["rst"])
+    fm.register(fpioa["rdy"], fm.fpioa.GPIOHS0 + gpiohs["rdy"])
+    fm.register(fpioa["mosi"], fm.fpioa.GPIOHS0 + gpiohs["mosi"])
+    fm.register(fpioa["miso"], fm.fpioa.GPIOHS0 + gpiohs["miso"])
+    fm.register(fpioa["sclk"], fm.fpioa.GPIOHS0 + gpiohs["sclk"])
+
+    print("[WIFI] pinmap OK (FPIOA->GPIOHS)")
 
     ssid = getattr(config, "WIFI_SSID", "")
     pwd = getattr(config, "WIFI_PASS", "")
@@ -146,19 +153,29 @@ def wifi_connect():
         print("[WIFI] SSID empty")
         return None
 
+    # IMPORTANT: pass GPIOHS *numbers* (10..15), not fm.fpioa.GPIOHSxx
+    cs_n = gpiohs["cs"]
+    rst_n = gpiohs["rst"]
+    rdy_n = gpiohs["rdy"]
+    mosi_n = gpiohs["mosi"]
+    miso_n = gpiohs["miso"]
+    sclk_n = gpiohs["sclk"]
+
+    print("[WIFI] GPIOHS:", cs_n, rst_n, rdy_n, mosi_n, miso_n, sclk_n, "spi=", spi_id)
+
     nic = None
     last_err = None
 
     for _ in range(3):
         try:
             nic = network.ESP32_SPI(
-                cs=fm.fpioa.GPIOHS10,
-                rst=fm.fpioa.GPIOHS11,
-                rdy=fm.fpioa.GPIOHS12,
-                mosi=fm.fpioa.GPIOHS13,
-                miso=fm.fpioa.GPIOHS14,
-                sclk=fm.fpioa.GPIOHS15,
-                spi=-1,
+                cs=cs_n,
+                rst=rst_n,
+                rdy=rdy_n,
+                mosi=mosi_n,
+                miso=miso_n,
+                sclk=sclk_n,
+                spi=spi_id,
             )
             break
         except Exception as e:
@@ -170,17 +187,12 @@ def wifi_connect():
         print("[WIFI] ESP32_SPI unavailable:", last_err)
         return None
 
-    print("ESP32_SPI object created")
-    try:
-        print("ESP32 FW:", nic.version())
-    except Exception as e:
-        print("[WIFI] version fail:", e)
+    print("[WIFI] ESP32_SPI object created")
 
     try:
-        aps = nic.scan()
-        print("APs:", aps)
+        print("[WIFI] ESP32 FW:", nic.version())
     except Exception as e:
-        print("[WIFI] scan fail:", e)
+        print("[WIFI] version fail:", e)
 
     try:
         nic.connect(ssid=ssid, key=pwd)
@@ -189,17 +201,14 @@ def wifi_connect():
         return None
 
     t0 = time.ticks_ms()
+    timeout = int(config.ESP32_SPI.get("timeout_ms", 20000))
     while not nic.isconnected():
         time.sleep_ms(200)
-        if time.ticks_diff(time.ticks_ms(), t0) > 20000:
+        if time.ticks_diff(time.ticks_ms(), t0) > timeout:
             print("[WIFI] connect timeout")
             return None
 
-    try:
-        print("IP:", nic.ifconfig())
-    except Exception as e:
-        print("[WIFI] ifconfig fail:", e)
-
+    print("[WIFI] IP:", nic.ifconfig())
     return nic
 
 
