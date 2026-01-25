@@ -1,5 +1,4 @@
 # k210/stereo_lcd_wifi/main.py
-
 import time
 import sensor
 import image
@@ -23,7 +22,7 @@ def _framesize_from_str(s):
         return sensor.QVGA
     if s == "VGA":
         return sensor.VGA
-    return sensor.QVGA
+    return sensor.QQVGA
 
 
 def _pixformat_from_str(s):
@@ -78,7 +77,6 @@ def init_lcd():
 def _config_one_side():
     sensor.set_pixformat(_pixformat_from_str(config.PIXFORMAT))
     sensor.set_framesize(_framesize_from_str(config.FRAME_SIZE))
-    # optional tuning
     try:
         sensor.set_auto_gain(True)
     except Exception:
@@ -141,10 +139,6 @@ def capture_right():
 # WiFi bring-up (ESP32)
 # -------------------------
 def wifi_connect():
-    """
-    Tries common MaixPy WiFi APIs.
-    Returns an object (nic) if available; otherwise returns None.
-    """
     if not getattr(config, "WIFI_ENABLE", True):
         return None
 
@@ -154,51 +148,98 @@ def wifi_connect():
         print("[WIFI] SSID empty, skip.")
         return None
 
-    # Variant A: network.ESP32_SPI() style
     try:
         import network
+        from fpioa_manager import fm
 
-        pins = getattr(config, "ESP32_SPI_PINS", {})
+        esp = getattr(config, "ESP32_SPI", None)
+        if esp is None:
+            raise Exception("ESP32_SPI missing in config")
+
+        fp = esp.get("fpioa", {})
+        gh = esp.get("gpiohs", {})
+        spi_mode = int(esp.get("spi", -1))
+        timeout_ms = int(esp.get("timeout_ms", 20000))
+
+        fm.register(
+            int(fp.get("cs", 25)), getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("cs", 10)))
+        )
+        fm.register(
+            int(fp.get("rst", 8)),
+            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rst", 11))),
+        )
+        fm.register(
+            int(fp.get("rdy", 9)),
+            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rdy", 12))),
+        )
+        fm.register(
+            int(fp.get("mosi", 28)),
+            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("mosi", 13))),
+        )
+        fm.register(
+            int(fp.get("miso", 26)),
+            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("miso", 14))),
+        )
+        fm.register(
+            int(fp.get("sclk", 27)),
+            getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("sclk", 15))),
+        )
+
+        cs_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("cs", 10)))
+        rst_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rst", 11)))
+        rdy_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("rdy", 12)))
+        mosi_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("mosi", 13)))
+        miso_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("miso", 14)))
+        sclk_f = getattr(fm.fpioa, "GPIOHS%d" % int(gh.get("sclk", 15)))
+
+        nic = network.ESP32_SPI(
+            cs=cs_f,
+            rst=rst_f,
+            rdy=rdy_f,
+            mosi=mosi_f,
+            miso=miso_f,
+            sclk=sclk_f,
+            spi=spi_mode,
+        )
+
+        print("[WIFI] fw:", nic.version())
+        print("[WIFI] scanning...")
         try:
-            nic = network.ESP32_SPI(
-                cs=pins.get("cs", 10),
-                rst=pins.get("rst", 11),
-                rdy=pins.get("rdy", 12),
-                mosi=pins.get("mosi", 13),
-                miso=pins.get("miso", 14),
-                sclk=pins.get("sclk", 15),
-            )
-        except Exception:
-            # some builds require no args
-            nic = network.ESP32_SPI()
+            print(nic.scan())
+        except Exception as e:
+            print("[WIFI] scan fail:", e)
 
-        nic.active(True)
-        print("[WIFI] connecting (network.ESP32_SPI)...")
-        nic.connect(ssid, pwd)
+        print("[WIFI] connecting...")
+        nic.connect(ssid=ssid, key=pwd)
 
         t0 = time.ticks_ms()
         while not nic.isconnected():
-            if time.ticks_diff(time.ticks_ms(), t0) > 15000:
+            if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
                 raise Exception("connect timeout")
             time.sleep_ms(200)
 
-        print("[WIFI] connected:", nic.ifconfig())
+        try:
+            print("[WIFI] connected:", nic.ifconfig())
+        except Exception:
+            print("[WIFI] connected")
         return nic
+
     except Exception as e:
         print("[WIFI] network.ESP32_SPI failed:", e)
 
-    # Variant B: maix.ESP32_Network style
     try:
         import maix
 
         print("[WIFI] connecting (maix.ESP32_Network)...")
         nic = maix.ESP32_Network()
         nic.connect(ssid, pwd)
+
         t0 = time.ticks_ms()
         while not nic.isconnected():
-            if time.ticks_diff(time.ticks_ms(), t0) > 15000:
+            if time.ticks_diff(time.ticks_ms(), t0) > 20000:
                 raise Exception("connect timeout")
             time.sleep_ms(200)
+
         print("[WIFI] connected")
         return nic
     except Exception as e:
@@ -209,26 +250,17 @@ def wifi_connect():
 
 
 # -------------------------
-# HTTP upload
+# JPEG + stitch
 # -------------------------
 def _jpeg_bytes(img, quality):
-    """
-    MaixPy image JPEG API differs across versions:
-    - some: img.compress(quality=Q) -> bytes
-    - some: img.compressed(quality=Q) -> bytes
-    """
     if hasattr(img, "compress"):
         return img.compress(quality=quality)
     if hasattr(img, "compressed"):
         return img.compressed(quality=quality)
-    # fallback: try default
     return img.compress()
 
 
 def stitch_lr(imgL, imgR):
-    """
-    Create one side-by-side image: [Left | Right]
-    """
     w = imgL.width()
     h = imgL.height()
     out = image.Image(w * 2, h)
@@ -237,41 +269,105 @@ def stitch_lr(imgL, imgR):
     return out
 
 
-def http_post_jpeg(jpeg, frame_id=None):
+# -------------------------
+# Socket-only HTTP client (NO urequests needed)
+# -------------------------
+def _parse_http_url(url):
+    # supports: http://host:port/path  or http://host/path
+    if not url.startswith("http://"):
+        raise ValueError("Only http:// is supported")
+    tmp = url[len("http://") :]
+    if "/" in tmp:
+        hostport, path = tmp.split("/", 1)
+        path = "/" + path
+    else:
+        hostport, path = tmp, "/"
+
+    if ":" in hostport:
+        host, port = hostport.split(":", 1)
+        port = int(port)
+    else:
+        host, port = hostport, 80
+    return host, port, path
+
+
+def http_get_raw(url, timeout_s=4):
+    # minimal GET for /ping debug
+    import usocket as socket
+
+    host, port, path = _parse_http_url(url)
+    addr = socket.getaddrinfo(host, port)[0][-1]
+    s = socket.socket()
+    s.settimeout(timeout_s)
+    s.connect(addr)
+    req = "GET %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n\r\n" % (
+        path,
+        host,
+        port,
+    )
+    s.send(req.encode())
+
+    # read a bit (status line)
+    data = s.recv(64)
+    s.close()
+    return data
+
+
+def http_post_jpeg_socket(jpeg, frame_id=None):
+    import usocket as socket
+
     url = getattr(config, "SERVER_URL", "")
     if not url:
         return False
 
     try:
-        import urequests as requests
-    except Exception:
-        try:
-            import requests
-        except Exception as e:
-            print("[HTTP] no requests/urequests:", e)
-            return False
-
-    headers = {
-        "Content-Type": "image/jpeg",
-    }
-    if frame_id is not None and getattr(config, "SEND_FRAME_ID", True):
-        headers["X-Frame-Id"] = str(frame_id)
+        host, port, path = _parse_http_url(url)
+    except Exception as e:
+        print("[HTTP] bad SERVER_URL:", e)
+        return False
 
     try:
-        r = requests.post(url, data=jpeg, headers=headers)
+        addr = socket.getaddrinfo(host, port)[0][-1]
+        s = socket.socket()
+        s.settimeout(6)
+        s.connect(addr)
+
+        hdr = ""
+        hdr += "POST %s HTTP/1.1\r\n" % path
+        hdr += "Host: %s:%d\r\n" % (host, port)
+        hdr += "Content-Type: image/jpeg\r\n"
+        hdr += "Content-Length: %d\r\n" % len(jpeg)
+        hdr += "Connection: close\r\n"
+        if frame_id is not None and getattr(config, "SEND_FRAME_ID", True):
+            hdr += "X-Frame-Id: %s\r\n" % str(frame_id)
+        hdr += "\r\n"
+
+        s.send(hdr.encode())
+        s.send(jpeg)
+
+        # Read first chunk including status line
+        resp = s.recv(96)
+        s.close()
+
+        # crude but effective
+        if b" 200 " in resp or b" 201 " in resp:
+            return True
+
+        print("[HTTP] resp:", resp)
+        return False
+
+    except Exception as e:
         try:
-            r.close()
+            s.close()
         except Exception:
             pass
-        return True
-    except Exception as e:
         print("[HTTP] POST failed:", e)
         return False
 
 
 def main():
     time.sleep_ms(300)
-    print("=== MaixPy Stereo LCD + WiFi Stream ===")
+    print("=== MaixPy Stereo LCD + WiFi Stream (socket) ===")
 
     if getattr(config, "USE_LCD", True):
         init_lcd()
@@ -285,7 +381,7 @@ def main():
         while True:
             time.sleep_ms(1000)
 
-    # WiFi init (optional)
+    # WiFi init
     nic = None
     if getattr(config, "WIFI_ENABLE", True):
         nic = wifi_connect()
@@ -294,8 +390,27 @@ def main():
         else:
             lcd_msg("WIFI OK", 24)
 
+    # Probe PC server (optional but recommended)
+    # Requires you added /ping in Flask.
+    if nic is not None:
+        try:
+            probe_url = "http://%s:%d/ping" % (
+                _parse_http_url(config.SERVER_URL)[0],
+                _parse_http_url(config.SERVER_URL)[1],
+            )
+            resp = http_get_raw(probe_url)
+            print("[PROBE] resp:", resp)
+            lcd_msg("PING OK" if b"200" in resp else "PING BAD", 24)
+        except Exception as e:
+            print("[PROBE] failed:", e)
+            lcd_msg("PING FAIL", 24)
+
     frame_id = 0
     last_send = time.ticks_ms()
+
+    # If your WiFi is shaky, start conservative
+    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 600))
+    q = int(getattr(config, "JPEG_QUALITY", 60))
 
     while True:
         try:
@@ -311,26 +426,24 @@ def main():
                 lcd_msg("R", 0)
             time.sleep_ms(int(getattr(config, "SWITCH_MS", 120)))
 
-            # Stream periodically
             if nic is not None and getattr(config, "WIFI_ENABLE", True):
                 now = time.ticks_ms()
-                if time.ticks_diff(now, last_send) >= int(
-                    getattr(config, "STREAM_INTERVAL_MS", 150)
-                ):
+                if time.ticks_diff(now, last_send) >= interval_ms:
                     last_send = now
 
-                    if getattr(config, "STITCH_LR", True):
-                        img = stitch_lr(imgL, imgR)
-                    else:
-                        # if you want: send only left or alternate
-                        img = imgL
+                    img = (
+                        stitch_lr(imgL, imgR)
+                        if getattr(config, "STITCH_LR", True)
+                        else imgL
+                    )
+                    jpeg = _jpeg_bytes(img, q)
 
-                    jpeg = _jpeg_bytes(img, int(getattr(config, "JPEG_QUALITY", 70)))
-                    ok = http_post_jpeg(jpeg, frame_id=frame_id)
+                    ok = http_post_jpeg_socket(jpeg, frame_id=frame_id)
                     frame_id += 1
 
+                    print("[TX] frame=%d bytes=%d ok=%s" % (frame_id, len(jpeg), ok))
                     if lcd_ok():
-                        lcd_msg("TX %d" % (frame_id), 12)
+                        lcd_msg("TX %d" % frame_id, 12)
                         if not ok:
                             lcd_msg("HTTP ERR", 24)
 
@@ -339,7 +452,6 @@ def main():
             if lcd_ok():
                 lcd_msg("LOOP ERR", 24)
             time.sleep_ms(200)
-            # try recover camera
             try:
                 init_binocular(warmup_pairs=8)
                 if lcd_ok():
