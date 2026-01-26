@@ -20,8 +20,8 @@ WIFI_PASS = "MYPASSWD"
 SERVER_URL = "http://192.168.1.100:5005/upload"
 
 # JPEG settings
-JPEG_QUALITY = 55  # 10..95 (higher = better quality/larger)
-STREAM_INTERVAL_MS = 150  # upload every N ms (tune for bandwidth)
+JPEG_QUALITY = 50  # 10..95 (higher = better quality/larger)
+STREAM_INTERVAL_MS = 100  # upload every N ms (tune for bandwidth)
 SOCKET_TIMEOUT = 12
 
 # If True, send one stitched image (Left|Right). Recommended.
