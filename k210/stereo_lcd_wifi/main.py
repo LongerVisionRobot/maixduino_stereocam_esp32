@@ -415,11 +415,61 @@ def main():
     frame_id = 0
     last_send = time.ticks_ms()
 
-    # 固定一个更稳的间隔：不要太小
-    post_gap_ms = 80  # 先用 80ms；RAW 太重可改 120ms
+    # 推荐先用这个（JPEG 比 RAW 轻很多）
+    post_gap_ms = 80  # 两次 POST 之间给 ESP32 / socket 缓冲
+    switch_ms = int(getattr(config, "SWITCH_MS", 200))
 
     while True:
-        # ---- capture LEFT + LCD preview ----
+        if not nic or not host:
+            # 仍然允许 LCD 预览
+            imgL = capture_left()
+            try:
+                imgL.draw_string(2, 2, "LEFT", color=0xFFFF, scale=2)
+            except:
+                pass
+            if lcd_ok():
+                lcd.display(imgL)
+
+            time.sleep_ms(switch_ms)
+
+            imgR = capture_right()
+            try:
+                imgR.draw_string(2, 2, "RIGHT", color=0xFFFF, scale=2)
+            except:
+                pass
+            if lcd_ok():
+                lcd.display(imgR)
+
+            time.sleep_ms(switch_ms)
+            continue
+
+        now = time.ticks_ms()
+        if time.ticks_diff(now, last_send) < interval_ms:
+            # 仍然做 LCD 预览但不上传
+            imgL = capture_left()
+            try:
+                imgL.draw_string(2, 2, "LEFT", color=0xFFFF, scale=2)
+            except:
+                pass
+            if lcd_ok():
+                lcd.display(imgL)
+            time.sleep_ms(switch_ms)
+
+            imgR = capture_right()
+            try:
+                imgR.draw_string(2, 2, "RIGHT", color=0xFFFF, scale=2)
+            except:
+                pass
+            if lcd_ok():
+                lcd.display(imgR)
+            time.sleep_ms(switch_ms)
+            continue
+
+        last_send = now
+        okL = okR = False
+        bytesL = bytesR = -1
+
+        # ----------------- LEFT: capture -> encode(bytes deep copy) -> POST -----------------
         imgL = capture_left()
         try:
             imgL.draw_string(2, 2, "LEFT", color=0xFFFF, scale=2)
@@ -429,21 +479,59 @@ def main():
             lcd.display(imgL)
             lcd_msg("L", 0)
 
-        # ✅ 关键：立刻冻结 LEFT 的上传数据（避免被 RIGHT 覆盖）
-        payloadL = None
         try:
             gc.collect()
             if stream_mode == "RAW":
                 payloadL = _rgb565_bytes(imgL)
             else:
                 payloadL = _jpeg_bytes(imgL, jpeg_q)
+
+            # ✅ 关键：强制深拷贝，彻底断开与底层 buffer 的关系
+            payloadL = bytearray(payloadL)
+            bytesL = len(payloadL)
+
+            if stream_mode == "RAW":
+                hdrL = {
+                    "Content-Type": "application/octet-stream",
+                    "X-W": str(w),
+                    "X-H": str(h),
+                    "X-Format": "RGB565",
+                    "X-Side": "L",
+                    "X-Frame-Id": "%dL" % frame_id,
+                }
+                okL = http_post_with_retry(
+                    host,
+                    port,
+                    "/upload_raw/L",
+                    payloadL,
+                    headers=hdrL,
+                    timeout_s=timeout_s,
+                    retry=http_retry,
+                )
+            else:
+                hdrL = {
+                    "Content-Type": "image/jpeg",
+                    "X-Side": "L",
+                    "X-Frame-Id": "%dL" % frame_id,
+                    "X-W": str(w),
+                    "X-H": str(h),
+                }
+                okL = http_post_with_retry(
+                    host,
+                    port,
+                    "/upload_jpeg/L",
+                    payloadL,
+                    headers=hdrL,
+                    timeout_s=timeout_s,
+                    retry=http_retry,
+                )
+
         except Exception as e:
-            print("[ENC] L failed:", e)
-            payloadL = None
+            print("[HTTP/ENC] L failed:", e)
 
-        time.sleep_ms(switch_ms)
+        time.sleep_ms(post_gap_ms)
 
-        # ---- capture RIGHT + LCD preview ----
+        # ----------------- RIGHT: capture -> encode(bytes deep copy) -> POST -----------------
         imgR = capture_right()
         try:
             imgR.draw_string(2, 2, "RIGHT", color=0xFFFF, scale=2)
@@ -453,143 +541,64 @@ def main():
             lcd.display(imgR)
             lcd_msg("R", 0)
 
-        # ✅ 关键：立刻冻结 RIGHT 的上传数据
-        payloadR = None
         try:
             gc.collect()
             if stream_mode == "RAW":
                 payloadR = _rgb565_bytes(imgR)
             else:
                 payloadR = _jpeg_bytes(imgR, jpeg_q)
+
+            # ✅ 同样深拷贝
+            payloadR = bytearray(payloadR)
+            bytesR = len(payloadR)
+
+            if stream_mode == "RAW":
+                hdrR = {
+                    "Content-Type": "application/octet-stream",
+                    "X-W": str(w),
+                    "X-H": str(h),
+                    "X-Format": "RGB565",
+                    "X-Side": "R",
+                    "X-Frame-Id": "%dR" % frame_id,
+                }
+                okR = http_post_with_retry(
+                    host,
+                    port,
+                    "/upload_raw/R",
+                    payloadR,
+                    headers=hdrR,
+                    timeout_s=timeout_s,
+                    retry=http_retry,
+                )
+            else:
+                hdrR = {
+                    "Content-Type": "image/jpeg",
+                    "X-Side": "R",
+                    "X-Frame-Id": "%dR" % frame_id,
+                    "X-W": str(w),
+                    "X-H": str(h),
+                }
+                okR = http_post_with_retry(
+                    host,
+                    port,
+                    "/upload_jpeg/R",
+                    payloadR,
+                    headers=hdrR,
+                    timeout_s=timeout_s,
+                    retry=http_retry,
+                )
+
         except Exception as e:
-            print("[ENC] R failed:", e)
-            payloadR = None
-
-        time.sleep_ms(switch_ms)
-
-        # ---- upload throttling ----
-        if not nic or not host:
-            continue
-
-        now = time.ticks_ms()
-        if time.ticks_diff(now, last_send) < interval_ms:
-            continue
-        last_send = now
-
-        okL = okR = False
-        bytesL = bytesR = -1
-
-        if stream_mode == "RAW":
-            # RGB565 RAW → /upload_raw/<side>
-            if payloadL is not None:
-                try:
-                    bytesL = len(payloadL)
-                    hdr = {
-                        "Content-Type": "application/octet-stream",
-                        "X-W": str(w),
-                        "X-H": str(h),
-                        "X-Format": "RGB565",
-                        "X-Side": "L",
-                        "X-Frame-Id": "%dL" % frame_id,
-                    }
-                    okL = http_post_with_retry(
-                        host,
-                        port,
-                        "/upload_raw/L",
-                        payloadL,
-                        headers=hdr,
-                        timeout_s=timeout_s,
-                        retry=http_retry,
-                    )
-                except Exception as e:
-                    print("[HTTP] L failed:", e)
-            else:
-                print("[SKIP] L payload None")
-
-            time.sleep_ms(post_gap_ms)
-
-            if payloadR is not None:
-                try:
-                    bytesR = len(payloadR)
-                    hdr = {
-                        "Content-Type": "application/octet-stream",
-                        "X-W": str(w),
-                        "X-H": str(h),
-                        "X-Format": "RGB565",
-                        "X-Side": "R",
-                        "X-Frame-Id": "%dR" % frame_id,
-                    }
-                    okR = http_post_with_retry(
-                        host,
-                        port,
-                        "/upload_raw/R",
-                        payloadR,
-                        headers=hdr,
-                        timeout_s=timeout_s,
-                        retry=http_retry,
-                    )
-                except Exception as e:
-                    print("[HTTP] R failed:", e)
-            else:
-                print("[SKIP] R payload None")
-
-        else:
-            # JPEG → /upload_jpeg/<side>
-            if payloadL is not None:
-                try:
-                    bytesL = len(payloadL)
-                    hdr = {
-                        "Content-Type": "image/jpeg",
-                        "X-Side": "L",
-                        "X-Frame-Id": "%dL" % frame_id,
-                        "X-W": str(w),
-                        "X-H": str(h),
-                    }
-                    okL = http_post_with_retry(
-                        host,
-                        port,
-                        "/upload_jpeg/L",
-                        payloadL,
-                        headers=hdr,
-                        timeout_s=timeout_s,
-                        retry=http_retry,
-                    )
-                except Exception as e:
-                    print("[HTTP] L failed:", e)
-            else:
-                print("[SKIP] L payload None")
-
-            time.sleep_ms(post_gap_ms)
-
-            if payloadR is not None:
-                try:
-                    bytesR = len(payloadR)
-                    hdr = {
-                        "Content-Type": "image/jpeg",
-                        "X-Side": "R",
-                        "X-Frame-Id": "%dR" % frame_id,
-                        "X-W": str(w),
-                        "X-H": str(h),
-                    }
-                    okR = http_post_with_retry(
-                        host,
-                        port,
-                        "/upload_jpeg/R",
-                        payloadR,
-                        headers=hdr,
-                        timeout_s=timeout_s,
-                        retry=http_retry,
-                    )
-                except Exception as e:
-                    print("[HTTP] R failed:", e)
-            else:
-                print("[SKIP] R payload None")
+            print("[HTTP/ENC] R failed:", e)
 
         frame_id += 1
         print(
             "[TX] frame=%d okL=%s okR=%s bytesL=%d bytesR=%d mode=%s"
             % (frame_id, okL, okR, bytesL, bytesR, stream_mode)
         )
+
+        # 给 LCD 一点点喘息，否则网络阻塞会“看起来像 freeze”
+        time.sleep_ms(switch_ms)
 
 
 if __name__ == "__main__":
