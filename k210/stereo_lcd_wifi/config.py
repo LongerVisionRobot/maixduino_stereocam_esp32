@@ -2,9 +2,9 @@
 
 # --- Camera/LCD ---
 USE_LCD = True
-FRAME_SIZE = "QVGA"  # "QQVGA" / "QVGA" / "VGA"
+FRAME_SIZE = "QQVGA"  # "QQVGA" / "QVGA" / "VGA"
 PIXFORMAT = "RGB565"  # "RGB565" or "GRAYSCALE"
-SWITCH_MS = 120  # preview switch interval (LCD)
+SWITCH_MS = 200  # preview switch interval (LCD)
 
 # --- WiFi stream ---
 WIFI_ENABLE = True
@@ -16,8 +16,8 @@ WIFI_PASS = "MYPASSWD"
 SERVER_URL = "http://192.168.1.100:5005/upload"
 
 # JPEG settings
-JPEG_QUALITY = 70  # 10..95 (higher = better quality/larger)
-STREAM_INTERVAL_MS = 150  # upload every N ms (tune for bandwidth)
+JPEG_QUALITY = 60  # 10..95 (higher = better quality/larger)
+STREAM_INTERVAL_MS = 200  # upload every N ms (tune for bandwidth)
 
 # If True, send one stitched image (Left|Right). Recommended.
 STITCH_LR = True
@@ -32,7 +32,7 @@ SEND_FRAME_ID = True
 # If your firmware supports auto ESP32 init, you can ignore these.
 ESP32_SPI = {
     "fpioa": {"cs": 25, "rst": 8, "rdy": 9, "mosi": 28, "miso": 26, "sclk": 27},
-    "gpiohs": {"cs": 10, "rst": 11, "rdy": 12, "mosi": 13, "miso": 14, "sclk": 15},
+    "gpiohs": {"cs": 0, "rst": 1, "rdy": 2, "mosi": 3, "miso": 4, "sclk": 5},
     "spi": -1,
     "timeout_ms": 20000,
 }
