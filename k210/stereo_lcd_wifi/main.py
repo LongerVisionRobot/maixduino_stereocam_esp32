@@ -1,6 +1,8 @@
+# k210/stereo_lcd_wifi/main.py
 import time
 import sensor
 import image
+import gc
 
 try:
     import lcd
@@ -65,8 +67,8 @@ def init_lcd():
 
 
 def _config_one_side():
-    sensor.set_pixformat(_pixformat_from_str(config.PIXFORMAT))
-    sensor.set_framesize(_framesize_from_str(config.FRAME_SIZE))
+    sensor.set_pixformat(_pixformat_from_str(getattr(config, "PIXFORMAT", "RGB565")))
+    sensor.set_framesize(_framesize_from_str(getattr(config, "FRAME_SIZE", "QVGA")))
     try:
         sensor.set_auto_gain(True)
     except Exception:
@@ -82,7 +84,7 @@ def _config_one_side():
     time.sleep_ms(30)
 
 
-def init_binocular(warmup_pairs=15):
+def init_binocular(warmup_pairs=12):
     try:
         sensor.reset()
         time.sleep_ms(80)
@@ -127,25 +129,24 @@ def capture_right():
 
 def wifi_connect():
     import network
-    from fpioa_manager import fm
     import time
+    from fpioa_manager import fm
 
     time.sleep_ms(1200)
 
-    # --- Use config mapping (recommended) ---
-    fpioa = config.ESP32_SPI.get("fpioa", {})
-    gpiohs = config.ESP32_SPI.get("gpiohs", {})
-    spi_id = config.ESP32_SPI.get("spi", -1)
+    spi_cfg = getattr(config, "ESP32_SPI", {}) or {}
+    fpioa = spi_cfg.get("fpioa", spi_cfg)
+    gpiohs = spi_cfg.get(
+        "gpiohs", {"cs": 0, "rst": 1, "rdy": 2, "mosi": 3, "miso": 4, "sclk": 5}
+    )
+    spi_id = spi_cfg.get("spi", -1)
+    timeout_ms = int(spi_cfg.get("timeout_ms", 20000))
 
-    # Map board pins -> GPIOHS functions
-    fm.register(fpioa["cs"], fm.fpioa.GPIOHS0 + gpiohs["cs"])
-    fm.register(fpioa["rst"], fm.fpioa.GPIOHS0 + gpiohs["rst"])
-    fm.register(fpioa["rdy"], fm.fpioa.GPIOHS0 + gpiohs["rdy"])
-    fm.register(fpioa["mosi"], fm.fpioa.GPIOHS0 + gpiohs["mosi"])
-    fm.register(fpioa["miso"], fm.fpioa.GPIOHS0 + gpiohs["miso"])
-    fm.register(fpioa["sclk"], fm.fpioa.GPIOHS0 + gpiohs["sclk"])
-
-    print("[WIFI] pinmap OK (FPIOA->GPIOHS)")
+    required = ("cs", "rst", "rdy", "mosi", "miso", "sclk")
+    for k in required:
+        if k not in fpioa:
+            print("[WIFI] missing fpioa pin:", k, "ESP32_SPI =", spi_cfg)
+            return None
 
     ssid = getattr(config, "WIFI_SSID", "")
     pwd = getattr(config, "WIFI_PASS", "")
@@ -153,80 +154,65 @@ def wifi_connect():
         print("[WIFI] SSID empty")
         return None
 
-    # IMPORTANT: pass GPIOHS *numbers* (10..15), not fm.fpioa.GPIOHSxx
-    cs_n = gpiohs["cs"]
-    rst_n = gpiohs["rst"]
-    rdy_n = gpiohs["rdy"]
-    mosi_n = gpiohs["mosi"]
-    miso_n = gpiohs["miso"]
-    sclk_n = gpiohs["sclk"]
+    vals = [gpiohs.get(k, 0) for k in required]
+    if min(vals) >= 8:
+        gpiohs = {k: gpiohs[k] - 10 for k in required}
+        print("[WIFI] normalize gpiohs 10.. ->", gpiohs)
 
-    print("[WIFI] GPIOHS:", cs_n, rst_n, rdy_n, mosi_n, miso_n, sclk_n, "spi=", spi_id)
+    def gh(idx):
+        return fm.fpioa.GPIOHS0 + int(idx)
 
-    nic = None
-    last_err = None
+    try:
+        fm.register(fpioa["cs"], gh(gpiohs["cs"]))
+        fm.register(fpioa["rst"], gh(gpiohs["rst"]))
+        fm.register(fpioa["rdy"], gh(gpiohs["rdy"]))
+        fm.register(fpioa["mosi"], gh(gpiohs["mosi"]))
+        fm.register(fpioa["miso"], gh(gpiohs["miso"]))
+        fm.register(fpioa["sclk"], gh(gpiohs["sclk"]))
+        print("[WIFI] pinmap OK (FPIOA->GPIOHS CONST)", gpiohs)
+    except Exception as e:
+        print("[WIFI] fm.register failed:", e)
 
-    for _ in range(3):
+    def do_connect(nic):
         try:
-            nic = network.ESP32_SPI(
-                cs=cs_n,
-                rst=rst_n,
-                rdy=rdy_n,
-                mosi=mosi_n,
-                miso=miso_n,
-                sclk=sclk_n,
-                spi=spi_id,
-            )
-            break
+            try:
+                print("[WIFI] ESP32 FW:", nic.version())
+            except Exception:
+                pass
+
+            nic.connect(ssid=ssid, key=pwd)
+            t0 = time.ticks_ms()
+            while not nic.isconnected():
+                time.sleep_ms(250)
+                if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
+                    print("[WIFI] connect timeout")
+                    return None
+            print("[WIFI] IP:", nic.ifconfig())
+            return nic
         except Exception as e:
-            last_err = e
-            print("[WIFI] ESP32_SPI create failed:", e)
-            time.sleep_ms(900)
-
-    if nic is None:
-        print("[WIFI] ESP32_SPI unavailable:", last_err)
-        return None
-
-    print("[WIFI] ESP32_SPI object created")
-
-    try:
-        print("[WIFI] ESP32 FW:", nic.version())
-    except Exception as e:
-        print("[WIFI] version fail:", e)
-
-    try:
-        nic.connect(ssid=ssid, key=pwd)
-    except Exception as e:
-        print("[WIFI] connect call fail:", e)
-        return None
-
-    t0 = time.ticks_ms()
-    timeout = int(config.ESP32_SPI.get("timeout_ms", 20000))
-    while not nic.isconnected():
-        time.sleep_ms(200)
-        if time.ticks_diff(time.ticks_ms(), t0) > timeout:
-            print("[WIFI] connect timeout")
+            print("[WIFI] connect phase failed:", e)
             return None
 
-    print("[WIFI] IP:", nic.ifconfig())
-    return nic
+    try:
+        print("[WIFI] try ESP32_SPI with GPIOHS CONSTANTS, spi=", spi_id)
+        nic = network.ESP32_SPI(
+            cs=gh(gpiohs["cs"]),
+            rst=gh(gpiohs["rst"]),
+            rdy=gh(gpiohs["rdy"]),
+            mosi=gh(gpiohs["mosi"]),
+            miso=gh(gpiohs["miso"]),
+            sclk=gh(gpiohs["sclk"]),
+            spi=spi_id,
+        )
+        print("[WIFI] ESP32_SPI created (GPIOHS CONST mode)")
+        nic2 = do_connect(nic)
+        if nic2:
+            return nic2
+    except Exception as e:
+        print("[WIFI] CONST mode failed:", e)
 
-
-def _jpeg_bytes(img, quality):
-    if hasattr(img, "compress"):
-        return img.compress(quality=quality)
-    if hasattr(img, "compressed"):
-        return img.compressed(quality=quality)
-    return img.compress()
-
-
-def stitch_lr(imgL, imgR):
-    w = imgL.width()
-    h = imgL.height()
-    out = image.Image(w * 2, h)
-    out.draw_image(imgL, 0, 0)
-    out.draw_image(imgR, w, 0)
-    return out
+    print("[WIFI] ESP32_SPI unavailable")
+    return None
 
 
 def _parse_http_url(url):
@@ -265,62 +251,88 @@ def http_get_raw(url, timeout_s=4):
     return data
 
 
-def http_post_jpeg_socket(jpeg, frame_id=None):
+def _server_base():
+    """
+    SERVER_URL examples:
+      http://192.168.1.101:5005
+      http://192.168.1.101:5005/upload   (we will still use /upload_raw)
+    """
+    url = (getattr(config, "SERVER_URL", "") or "").strip()
+    if not url:
+        return None, None
+    host, port, _ = _parse_http_url(url)
+    return host, port
+
+
+def _img_to_rgb565_bytes(img):
+    # Most MaixPy builds for K210 support img.to_bytes() returning RGB565 for RGB565 images.
+    if hasattr(img, "to_bytes"):
+        b = img.to_bytes()
+        if isinstance(b, (bytes, bytearray)):
+            return b
+    if hasattr(img, "bytearray"):
+        b = img.bytearray()
+        if isinstance(b, (bytes, bytearray)):
+            return b
+    raise Exception("Image->RAW bytes not supported (need img.to_bytes/bytearray)")
+
+
+def _sendall_chunked(sock, data, chunk=1024):
+    # chunked send to avoid EIO on ESP32_SPI soft stack
+    mv = memoryview(data)
+    n = len(mv)
+    off = 0
+    while off < n:
+        end = off + chunk
+        if end > n:
+            end = n
+        sock.send(mv[off:end])
+        off = end
+
+
+def http_post_raw_rgb565(host, port, path, raw_bytes, w, h, frame_id=None):
     import usocket as socket
 
-    url = getattr(config, "SERVER_URL", "")
-    if not url:
-        return False
+    if not isinstance(raw_bytes, (bytes, bytearray)):
+        raise Exception("raw must be bytes/bytearray")
+    addr = socket.getaddrinfo(host, port)[0][-1]
+    s = socket.socket()
+    s.settimeout(10)
 
     try:
-        host, port, path = _parse_http_url(url)
-    except Exception as e:
-        print("[HTTP] bad SERVER_URL:", e)
-        return False
-
-    s = None
-    try:
-        addr = socket.getaddrinfo(host, port)[0][-1]
-        s = socket.socket()
-        s.settimeout(8)
         s.connect(addr)
 
         hdr = ""
         hdr += "POST %s HTTP/1.1\r\n" % path
         hdr += "Host: %s:%d\r\n" % (host, port)
-        hdr += "Content-Type: image/jpeg\r\n"
-        hdr += "Content-Length: %d\r\n" % len(jpeg)
+        hdr += "Content-Type: application/octet-stream\r\n"
+        hdr += "Content-Length: %d\r\n" % len(raw_bytes)
         hdr += "Connection: close\r\n"
+        hdr += "X-Pix: RGB565\r\n"
+        hdr += "X-W: %d\r\n" % int(w)
+        hdr += "X-H: %d\r\n" % int(h)
         if frame_id is not None and getattr(config, "SEND_FRAME_ID", True):
             hdr += "X-Frame-Id: %s\r\n" % str(frame_id)
         hdr += "\r\n"
 
         s.send(hdr.encode())
-        s.send(jpeg)
+        _sendall_chunked(s, raw_bytes, chunk=int(getattr(config, "SEND_CHUNK", 1024)))
 
         resp = s.recv(96)
+        ok = (b" 200 " in resp) or (b" 201 " in resp)
         s.close()
-        s = None
-
-        if b" 200 " in resp or b" 201 " in resp:
-            return True
-
-        print("[HTTP] resp:", resp)
-        return False
-
+        return ok, resp
     except Exception as e:
         try:
-            if s:
-                s.close()
+            s.close()
         except Exception:
             pass
-        print("[HTTP] POST failed:", e)
-        return False
+        raise e
 
 
 def main():
     time.sleep_ms(350)
-    print("=== MaixPy Stereo LCD + WiFi Stream (socket) ===")
+    print("=== MaixPy Stereo LCD + WiFi Stream (RAW RGB565) ===")
 
     if getattr(config, "USE_LCD", True):
         init_lcd()
@@ -333,24 +345,20 @@ def main():
         while True:
             time.sleep_ms(1000)
 
-    time.sleep_ms(1000)
+    time.sleep_ms(800)
 
     nic = None
     if getattr(config, "WIFI_ENABLE", True):
-        try:
-            nic = wifi_connect()
-        except Exception as e:
-            print("[WIFI] fatal:", e)
-            nic = None
-
+        nic = wifi_connect()
         if nic is None:
             lcd_msg("WIFI FAIL", 24)
         else:
             lcd_msg("WIFI OK", 24)
 
+    host = port = None
     if nic is not None:
         try:
-            host, port, _ = _parse_http_url(config.SERVER_URL)
+            host, port = _server_base()
             probe_url = "http://%s:%d/ping" % (host, port)
             resp = http_get_raw(probe_url)
             print("[PROBE] resp:", resp)
@@ -358,12 +366,18 @@ def main():
         except Exception as e:
             print("[PROBE] failed:", e)
             lcd_msg("PING FAIL", 24)
+            host = port = None
 
     frame_id = 0
     last_send = time.ticks_ms()
-    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 600))
-    q = int(getattr(config, "JPEG_QUALITY", 60))
+
+    # IMPORTANT: slow down by default (soft spi + big payload)
+    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 1800))
     switch_ms = int(getattr(config, "SWITCH_MS", 120))
+
+    # EIO backoff / reconnect
+    consecutive_fail = 0
+    fail_reconnect_n = int(getattr(config, "FAIL_RECONNECT_N", 4))
 
     while True:
         try:
@@ -379,34 +393,98 @@ def main():
                 lcd_msg("R", 0)
             time.sleep_ms(switch_ms)
 
-            if nic is not None and getattr(config, "WIFI_ENABLE", True):
-                now = time.ticks_ms()
-                if time.ticks_diff(now, last_send) >= interval_ms:
-                    last_send = now
+            if nic is None or host is None:
+                time.sleep_ms(300)
+                continue
 
-                    if getattr(config, "STITCH_LR", True):
-                        img = stitch_lr(imgL, imgR)
-                    else:
-                        img = imgL
+            now = time.ticks_ms()
+            if time.ticks_diff(now, last_send) < interval_ms:
+                continue
+            last_send = now
 
-                    jpeg = _jpeg_bytes(img, q)
+            gc.collect()
 
-                    ok = http_post_jpeg_socket(jpeg, frame_id=frame_id)
-                    frame_id += 1
+            okL = okR = False
+            bytesL = bytesR = -1
 
-                    print("[TX] frame=%d bytes=%d ok=%s" % (frame_id, len(jpeg), ok))
-                    if lcd_ok():
-                        lcd_msg("TX %d" % frame_id, 12)
-                        if not ok:
-                            lcd_msg("HTTP ERR", 24)
+            # LEFT
+            try:
+                rawL = _img_to_rgb565_bytes(imgL)
+                bytesL = len(rawL)
+                okL, _ = http_post_raw_rgb565(
+                    host,
+                    port,
+                    "/upload_raw/L",
+                    rawL,
+                    imgL.width(),
+                    imgL.height(),
+                    frame_id=str(frame_id) + "L",
+                )
+            except Exception as e:
+                print("[HTTP] L failed:", e)
+                okL = False
+
+            gc.collect()
+            time.sleep_ms(60)
+
+            # RIGHT
+            try:
+                rawR = _img_to_rgb565_bytes(imgR)
+                bytesR = len(rawR)
+                okR, _ = http_post_raw_rgb565(
+                    host,
+                    port,
+                    "/upload_raw/R",
+                    rawR,
+                    imgR.width(),
+                    imgR.height(),
+                    frame_id=str(frame_id) + "R",
+                )
+            except Exception as e:
+                print("[HTTP] R failed:", e)
+                okR = False
+
+            frame_id += 1
+            print(
+                "[TX] frame=%d okL=%s okR=%s bytesL=%d bytesR=%d"
+                % (frame_id, okL, okR, bytesL, bytesR)
+            )
+
+            if lcd_ok():
+                lcd_msg("TX %d" % frame_id, 12)
+                if (not okL) or (not okR):
+                    lcd_msg("HTTP ERR", 24)
+
+            # handle failures
+            if okL and okR:
+                consecutive_fail = 0
+            else:
+                consecutive_fail += 1
+                # backoff to avoid hammering ESP32 stack
+                time.sleep_ms(800 + 300 * consecutive_fail)
+
+                if consecutive_fail >= fail_reconnect_n:
+                    print("[WIFI] too many fails -> reconnect wifi")
+                    consecutive_fail = 0
+                    try:
+                        nic = wifi_connect()
+                        if nic is not None:
+                            host, port = _server_base()
+                            probe_url = "http://%s:%d/ping" % (host, port)
+                            resp = http_get_raw(probe_url)
+                            print("[PROBE] resp:", resp)
+                    except Exception as e:
+                        print("[WIFI] reconnect failed:", e)
+                        nic = None
+                        host = port = None
 
         except Exception as e:
             print("[LOOP] error:", e)
             if lcd_ok():
                 lcd_msg("LOOP ERR", 24)
-            time.sleep_ms(300)
+            time.sleep_ms(400)
             try:
-                init_binocular(warmup_pairs=8)
+                init_binocular(warmup_pairs=6)
                 if lcd_ok():
                     lcd_msg("RECOVER OK", 24)
             except Exception:
