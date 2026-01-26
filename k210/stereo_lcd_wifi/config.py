@@ -2,7 +2,7 @@
 
 # --- Camera/LCD ---
 USE_LCD = True
-FRAME_SIZE = "QQVGA"  # "QQVGA" / "QVGA" / "VGA"
+FRAME_SIZE = "QVGA"  # "QQVGA" / "QVGA" / "VGA"
 PIXFORMAT = "RGB565"  # "RGB565" or "GRAYSCALE"
 SWITCH_MS = 200  # preview switch interval (LCD)
 
@@ -17,7 +17,9 @@ SERVER_URL = "http://192.168.1.100:5005/upload"
 
 # JPEG settings
 JPEG_QUALITY = 60  # 10..95 (higher = better quality/larger)
-STREAM_INTERVAL_MS = 200  # upload every N ms (tune for bandwidth)
+STREAM_INTERVAL_MS = 1200  # upload every N ms (tune for bandwidth)
+SEND_CHUNK = 512
+SOCKET_TIMEOUT = 12
 
 # If True, send one stitched image (Left|Right). Recommended.
 STITCH_LR = True
