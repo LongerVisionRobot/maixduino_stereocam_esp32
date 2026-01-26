@@ -6,6 +6,10 @@ FRAME_SIZE = "QVGA"  # "QQVGA" / "QVGA" / "VGA"
 PIXFORMAT = "RGB565"  # "RGB565" or "GRAYSCALE"
 SWITCH_MS = 200  # preview switch interval (LCD)
 
+# Stream payload mode: "JPEG" or "RAW"
+STREAM_MODE = "JPEG"  # ✅ 发 JPEG（强烈推荐）
+# STREAM_MODE = "RAW"  # 发 RGB565 原始流（调试用）
+
 # --- WiFi stream ---
 WIFI_ENABLE = True
 WIFI_SSID = "MYSSID"
