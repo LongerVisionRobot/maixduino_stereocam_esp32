@@ -23,6 +23,18 @@ def _framesize_from_str(s):
     return sensor.QVGA
 
 
+def _framesize_wh(fs):
+    # MaixPy 常用尺寸
+    if fs == sensor.QQVGA:
+        return 160, 120
+    if fs == sensor.QVGA:
+        return 320, 240
+    if fs == sensor.VGA:
+        return 640, 480
+    # fallback
+    return 320, 240
+
+
 def _pixformat_from_str(s):
     s = str(s).upper().strip()
     if s in ("RGB565", "RGB"):
@@ -68,7 +80,9 @@ def init_lcd():
 
 def _config_one_side():
     sensor.set_pixformat(_pixformat_from_str(getattr(config, "PIXFORMAT", "RGB565")))
-    sensor.set_framesize(_framesize_from_str(getattr(config, "FRAME_SIZE", "QVGA")))
+    fs = _framesize_from_str(getattr(config, "FRAME_SIZE", "QVGA"))
+    sensor.set_framesize(fs)
+
     try:
         sensor.set_auto_gain(True)
     except Exception:
@@ -127,11 +141,11 @@ def capture_right():
     return sensor.snapshot()
 
 
+# ---------- WiFi ----------
 def wifi_connect():
     import network
     from fpioa_manager import fm
 
-    # 让系统更稳一点（ESP32 起来需要时间）
     time.sleep_ms(int(getattr(config, "WIFI_BOOT_DELAY_MS", 1200)))
 
     spi_cfg = getattr(config, "ESP32_SPI", {}) or {}
@@ -140,7 +154,7 @@ def wifi_connect():
         "gpiohs", {"cs": 0, "rst": 1, "rdy": 2, "mosi": 3, "miso": 4, "sclk": 5}
     )
 
-    # 你已经确认：MaixDuino 固定 SPI1 hard
+    # 你已经确认：MaixDuino 固定硬 SPI1
     spi_id = 1
     timeout_ms = int(spi_cfg.get("timeout_ms", 20000))
 
@@ -156,11 +170,9 @@ def wifi_connect():
         print("[WIFI] SSID empty")
         return None
 
-    # 关键：用 GPIOHS 常量（GPIOHS0 + idx）
     def gh(idx):
         return fm.fpioa.GPIOHS0 + int(idx)
 
-    # FPIOA -> GPIOHS FUNC 绑定
     try:
         fm.register(fpioa["cs"], gh(gpiohs["cs"]))
         fm.register(fpioa["rst"], gh(gpiohs["rst"]))
@@ -211,6 +223,7 @@ def wifi_connect():
         return None
 
 
+# ---------- HTTP ----------
 def _parse_http_url(url):
     if not url.startswith("http://"):
         raise ValueError("Only http:// is supported")
@@ -252,8 +265,6 @@ def _to_bytes_maybe(obj):
         return None
     if isinstance(obj, (bytes, bytearray)):
         return obj
-
-    # MaixPy 有的版本是 Image.to_bytes() / Image.bytearray()
     if hasattr(obj, "to_bytes"):
         try:
             b = obj.to_bytes()
@@ -272,38 +283,29 @@ def _to_bytes_maybe(obj):
 
 
 def _jpeg_bytes(img, quality):
-    # img.compress -> (Image or bytes) -> bytes
     j = img.compress(quality=quality)
     b = _to_bytes_maybe(j)
     if b and len(b) > 200:
         return b
-
-    # 兜底：有些固件 bytes(Image) 可以
     try:
         b = bytes(j)
         if isinstance(b, (bytes, bytearray)) and len(b) > 200:
             return b
     except Exception:
         pass
-
     raise Exception("JPEG encode returned non-bytes Image (cannot extract bytes)")
 
 
 def _rgb565_bytes(img):
-    # RGB565 RAW：需要拿到 w*h*2 的 bytes
-    # MaixPy 常见：img.to_bytes() / img.bytearray()
     b = _to_bytes_maybe(img)
     if b:
         return b
-
-    # 再兜底：bytes(img) 有些固件可行
     try:
         b = bytes(img)
         if isinstance(b, (bytes, bytearray)):
             return b
     except Exception:
         pass
-
     raise Exception("RGB565 image cannot extract bytes")
 
 
@@ -338,27 +340,25 @@ def http_post(host, port, path, payload, headers=None, timeout_s=10):
     except Exception:
         pass
 
-    # 只看第一包里有没有 200/201（够用了）
     if (b" 200 " in resp) or (b" 201 " in resp):
         return True
 
-    # 把第一行吐出来，方便你定位到底 400/404/413/500
     first = resp.split(b"\r\n", 1)[0] if resp else b""
     raise Exception("HTTP not 200/201, first=%s" % first)
 
 
 def http_post_with_retry(
-    host, port, path, payload, headers=None, timeout_s=10, retry=1, backoff_ms=120
+    host, port, path, payload, headers=None, timeout_s=10, retry=1
 ):
     last = None
-    for i in range(int(retry) + 1):
+    for _ in range(int(retry) + 1):
         try:
             return http_post(
                 host, port, path, payload, headers=headers, timeout_s=timeout_s
             )
         except Exception as e:
             last = e
-            time.sleep_ms(int(backoff_ms))
+            time.sleep_ms(120)
     raise last
 
 
@@ -367,12 +367,16 @@ def main():
     time.sleep_ms(350)
 
     stream_mode = str(getattr(config, "STREAM_MODE", "RAW")).upper().strip()
-    # RAW: /upload_raw/<side> (RGB565)
-    # JPEG: /upload_jpeg/<side> (JPEG)
     if stream_mode not in ("RAW", "JPEG"):
         stream_mode = "RAW"
 
-    print("=== MaixPy Stereo LCD + WiFi Stream (%s QVGA) ===" % stream_mode)
+    fs = _framesize_from_str(getattr(config, "FRAME_SIZE", "QVGA"))
+    w, h = _framesize_wh(fs)
+
+    print(
+        "=== MaixPy Stereo LCD + WiFi Stream (%s %s) ==="
+        % (stream_mode, getattr(config, "FRAME_SIZE", "QVGA"))
+    )
 
     if getattr(config, "USE_LCD", True):
         init_lcd()
@@ -389,47 +393,81 @@ def main():
         host, port, base_path = _parse_http_url(
             getattr(config, "SERVER_URL", "").strip()
         )
-        # base_path 为空时，server 根路径
         if base_path.endswith("/") and base_path != "/":
             base_path = base_path[:-1]
 
+        # 仅用于连通性探测
         try:
             resp = http_get_raw("http://%s:%d/ping" % (host, port))
             print("[PROBE] resp:", resp)
         except Exception as e:
             print("[PROBE] failed:", e)
 
-    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 300))
-    switch_ms = int(getattr(config, "SWITCH_MS", 40))
-
-    jpeg_q = int(getattr(config, "JPEG_QUALITY", 70))
+    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 1200))
+    switch_ms = int(getattr(config, "SWITCH_MS", 200))
+    jpeg_q = int(getattr(config, "JPEG_QUALITY", 60))
     http_retry = int(getattr(config, "HTTP_RETRY", 1))
-    timeout_s = int(getattr(config, "SOCKET_TIMEOUT", 10))
-    gap_ms = int(getattr(config, "POST_GAP_MS", 120))  # 很关键：缓解 EIO
+    timeout_s = int(getattr(config, "SOCKET_TIMEOUT", 12))
+
+    # 关键：两次 POST 间隔，缓解 ESP32/EIO（你已经观察到会 EIO）
+    post_gap_ms = int(getattr(config, "POST_GAP_MS", 120))
 
     frame_id = 0
     last_send = time.ticks_ms()
 
-    # framesize 对应的 w/h（QVGA=320x240, QQVGA=160x120, VGA=640x480）
-    # 你坚持 QVGA，那就 320x240
-    w = int(getattr(config, "RAW_W", 320))
-    h = int(getattr(config, "RAW_H", 240))
+    # 固定一个更稳的间隔：不要太小
+    post_gap_ms = 80  # 先用 80ms；RAW 太重可改 120ms
 
     while True:
+        # ---- capture LEFT + LCD preview ----
         imgL = capture_left()
-        imgL.draw_string(2, 2, "LEFT", color=0xFFFF, scale=2)
+        try:
+            imgL.draw_string(2, 2, "LEFT", color=0xFFFF, scale=2)
+        except Exception:
+            pass
         if lcd_ok():
             lcd.display(imgL)
             lcd_msg("L", 0)
+
+        # ✅ 关键：立刻冻结 LEFT 的上传数据（避免被 RIGHT 覆盖）
+        payloadL = None
+        try:
+            gc.collect()
+            if stream_mode == "RAW":
+                payloadL = _rgb565_bytes(imgL)
+            else:
+                payloadL = _jpeg_bytes(imgL, jpeg_q)
+        except Exception as e:
+            print("[ENC] L failed:", e)
+            payloadL = None
+
         time.sleep_ms(switch_ms)
 
+        # ---- capture RIGHT + LCD preview ----
         imgR = capture_right()
-        imgR.draw_string(2, 2, "RIGHT", color=0xFFFF, scale=2)
+        try:
+            imgR.draw_string(2, 2, "RIGHT", color=0xFFFF, scale=2)
+        except Exception:
+            pass
         if lcd_ok():
             lcd.display(imgR)
             lcd_msg("R", 0)
+
+        # ✅ 关键：立刻冻结 RIGHT 的上传数据
+        payloadR = None
+        try:
+            gc.collect()
+            if stream_mode == "RAW":
+                payloadR = _rgb565_bytes(imgR)
+            else:
+                payloadR = _jpeg_bytes(imgR, jpeg_q)
+        except Exception as e:
+            print("[ENC] R failed:", e)
+            payloadR = None
+
         time.sleep_ms(switch_ms)
 
+        # ---- upload throttling ----
         if not nic or not host:
             continue
 
@@ -442,102 +480,110 @@ def main():
         bytesL = bytesR = -1
 
         if stream_mode == "RAW":
-            # RGB565 RAW
-            try:
-                gc.collect()
-                rawL = _rgb565_bytes(imgL)
-                bytesL = len(rawL)
-                hdr = {
-                    "Content-Type": "application/octet-stream",
-                    "X-W": str(w),
-                    "X-H": str(h),
-                    "X-Format": "RGB565",
-                    "X-Side": "L",
-                    "X-Frame-Id": "%dL" % frame_id,
-                }
-                okL = http_post_with_retry(
-                    host,
-                    port,
-                    "/upload_raw/L",
-                    rawL,
-                    headers=hdr,
-                    timeout_s=timeout_s,
-                    retry=http_retry,
-                )
-            except Exception as e:
-                print("[HTTP] L failed:", e)
+            # RGB565 RAW → /upload_raw/<side>
+            if payloadL is not None:
+                try:
+                    bytesL = len(payloadL)
+                    hdr = {
+                        "Content-Type": "application/octet-stream",
+                        "X-W": str(w),
+                        "X-H": str(h),
+                        "X-Format": "RGB565",
+                        "X-Side": "L",
+                        "X-Frame-Id": "%dL" % frame_id,
+                    }
+                    okL = http_post_with_retry(
+                        host,
+                        port,
+                        "/upload_raw/L",
+                        payloadL,
+                        headers=hdr,
+                        timeout_s=timeout_s,
+                        retry=http_retry,
+                    )
+                except Exception as e:
+                    print("[HTTP] L failed:", e)
+            else:
+                print("[SKIP] L payload None")
 
-            time.sleep_ms(gap_ms)
+            time.sleep_ms(post_gap_ms)
 
-            try:
-                gc.collect()
-                rawR = _rgb565_bytes(imgR)
-                bytesR = len(rawR)
-                hdr = {
-                    "Content-Type": "application/octet-stream",
-                    "X-W": str(w),
-                    "X-H": str(h),
-                    "X-Format": "RGB565",
-                    "X-Side": "R",
-                    "X-Frame-Id": "%dR" % frame_id,
-                }
-                okR = http_post_with_retry(
-                    host,
-                    port,
-                    "/upload_raw/R",
-                    rawR,
-                    headers=hdr,
-                    timeout_s=timeout_s,
-                    retry=http_retry,
-                )
-            except Exception as e:
-                print("[HTTP] R failed:", e)
+            if payloadR is not None:
+                try:
+                    bytesR = len(payloadR)
+                    hdr = {
+                        "Content-Type": "application/octet-stream",
+                        "X-W": str(w),
+                        "X-H": str(h),
+                        "X-Format": "RGB565",
+                        "X-Side": "R",
+                        "X-Frame-Id": "%dR" % frame_id,
+                    }
+                    okR = http_post_with_retry(
+                        host,
+                        port,
+                        "/upload_raw/R",
+                        payloadR,
+                        headers=hdr,
+                        timeout_s=timeout_s,
+                        retry=http_retry,
+                    )
+                except Exception as e:
+                    print("[HTTP] R failed:", e)
+            else:
+                print("[SKIP] R payload None")
 
         else:
-            # JPEG
-            try:
-                gc.collect()
-                jpgL = _jpeg_bytes(imgL, jpeg_q)
-                bytesL = len(jpgL)
-                hdr = {
-                    "Content-Type": "image/jpeg",
-                    "X-Side": "L",
-                    "X-Frame-Id": "%dL" % frame_id,
-                }
-                okL = http_post_with_retry(
-                    host,
-                    port,
-                    "/upload_jpeg/L",
-                    jpgL,
-                    headers=hdr,
-                    timeout_s=timeout_s,
-                    retry=http_retry,
-                )
-            except Exception as e:
-                print("[HTTP] L failed:", e)
+            # JPEG → /upload_jpeg/<side>
+            if payloadL is not None:
+                try:
+                    bytesL = len(payloadL)
+                    hdr = {
+                        "Content-Type": "image/jpeg",
+                        "X-Side": "L",
+                        "X-Frame-Id": "%dL" % frame_id,
+                        "X-W": str(w),
+                        "X-H": str(h),
+                    }
+                    okL = http_post_with_retry(
+                        host,
+                        port,
+                        "/upload_jpeg/L",
+                        payloadL,
+                        headers=hdr,
+                        timeout_s=timeout_s,
+                        retry=http_retry,
+                    )
+                except Exception as e:
+                    print("[HTTP] L failed:", e)
+            else:
+                print("[SKIP] L payload None")
 
-            time.sleep_ms(gap_ms)
+            time.sleep_ms(post_gap_ms)
 
-            try:
-                gc.collect()
-                jpgR = _jpeg_bytes(imgR, jpeg_q)
-                bytesR = len(jpgR)
-                hdr = {
-                    "Content-Type": "image/jpeg",
-                    "X-Side": "R",
-                    "X-Frame-Id": "%dR" % frame_id,
-                }
-                okR = http_post_with_retry(
-                    host,
-                    port,
-                    "/upload_jpeg/R",
-                    jpgR,
-                    headers=hdr,
-                    timeout_s=timeout_s,
-                    retry=http_retry,
-                )
-            except Exception as e:
-                print("[HTTP] R failed:", e)
+            if payloadR is not None:
+                try:
+                    bytesR = len(payloadR)
+                    hdr = {
+                        "Content-Type": "image/jpeg",
+                        "X-Side": "R",
+                        "X-Frame-Id": "%dR" % frame_id,
+                        "X-W": str(w),
+                        "X-H": str(h),
+                    }
+                    okR = http_post_with_retry(
+                        host,
+                        port,
+                        "/upload_jpeg/R",
+                        payloadR,
+                        headers=hdr,
+                        timeout_s=timeout_s,
+                        retry=http_retry,
+                    )
+                except Exception as e:
+                    print("[HTTP] R failed:", e)
+            else:
+                print("[SKIP] R payload None")
 
         frame_id += 1
         print(
