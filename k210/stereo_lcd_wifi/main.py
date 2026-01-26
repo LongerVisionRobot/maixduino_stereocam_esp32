@@ -1,7 +1,6 @@
 # k210/stereo_lcd_wifi/main.py
 import time
 import sensor
-import image
 import gc
 
 try:
@@ -20,7 +19,7 @@ def _framesize_from_str(s):
         return sensor.QVGA
     if s == "VGA":
         return sensor.VGA
-    return sensor.QQVGA
+    return sensor.QVGA
 
 
 def _pixformat_from_str(s):
@@ -111,10 +110,10 @@ def init_binocular(warmup_pairs=12):
             sensor.snapshot()
         except Exception:
             pass
-        time.sleep_ms(25)
+        time.sleep_ms(20)
 
-    lcd_msg("CAM OK", 12)
     print("[CAM] binocular ready")
+    lcd_msg("CAM OK", 12)
 
 
 def capture_left():
@@ -139,7 +138,7 @@ def wifi_connect():
     gpiohs = spi_cfg.get(
         "gpiohs", {"cs": 0, "rst": 1, "rdy": 2, "mosi": 3, "miso": 4, "sclk": 5}
     )
-    spi_id = spi_cfg.get("spi", -1)
+    spi_id = int(spi_cfg.get("spi", -1))
     timeout_ms = int(spi_cfg.get("timeout_ms", 20000))
 
     required = ("cs", "rst", "rdy", "mosi", "miso", "sclk")
@@ -154,14 +153,17 @@ def wifi_connect():
         print("[WIFI] SSID empty")
         return None
 
-    vals = [gpiohs.get(k, 0) for k in required]
+    # 兼容有人写 GPIOHS10..15 的情况
+    vals = [int(gpiohs.get(k, 0)) for k in required]
     if min(vals) >= 8:
-        gpiohs = {k: gpiohs[k] - 10 for k in required}
+        gpiohs = {k: int(gpiohs[k]) - 10 for k in required}
         print("[WIFI] normalize gpiohs 10.. ->", gpiohs)
 
+    # 关键：用 GPIOHS 常量（GPIOHS0 + idx）
     def gh(idx):
         return fm.fpioa.GPIOHS0 + int(idx)
 
+    # 先把 FPIOA -> GPIOHS FUNC 绑定好
     try:
         fm.register(fpioa["cs"], gh(gpiohs["cs"]))
         fm.register(fpioa["rst"], gh(gpiohs["rst"]))
@@ -172,6 +174,7 @@ def wifi_connect():
         print("[WIFI] pinmap OK (FPIOA->GPIOHS CONST)", gpiohs)
     except Exception as e:
         print("[WIFI] fm.register failed:", e)
+        return None
 
     def do_connect(nic):
         try:
@@ -183,7 +186,7 @@ def wifi_connect():
             nic.connect(ssid=ssid, key=pwd)
             t0 = time.ticks_ms()
             while not nic.isconnected():
-                time.sleep_ms(250)
+                time.sleep_ms(200)
                 if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
                     print("[WIFI] connect timeout")
                     return None
@@ -193,6 +196,7 @@ def wifi_connect():
             print("[WIFI] connect phase failed:", e)
             return None
 
+    # 只走这条（你之前能跑通的那条）
     try:
         print("[WIFI] try ESP32_SPI with GPIOHS CONSTANTS, spi=", spi_id)
         nic = network.ESP32_SPI(
@@ -202,17 +206,13 @@ def wifi_connect():
             mosi=gh(gpiohs["mosi"]),
             miso=gh(gpiohs["miso"]),
             sclk=gh(gpiohs["sclk"]),
-            spi=spi_id,
+            spi=1,
         )
         print("[WIFI] ESP32_SPI created (GPIOHS CONST mode)")
-        nic2 = do_connect(nic)
-        if nic2:
-            return nic2
+        return do_connect(nic)
     except Exception as e:
         print("[WIFI] CONST mode failed:", e)
-
-    print("[WIFI] ESP32_SPI unavailable")
-    return None
+        return None
 
 
 def _parse_http_url(url):
@@ -251,244 +251,195 @@ def http_get_raw(url, timeout_s=4):
     return data
 
 
-def _server_base():
-    """
-    SERVER_URL examples:
-      http://192.168.1.101:5005
-      http://192.168.1.101:5005/upload   (we will still use /upload_raw)
-    """
-    url = (getattr(config, "SERVER_URL", "") or "").strip()
-    if not url:
-        return None, None
-    host, port, _ = _parse_http_url(url)
-    return host, port
+def _to_bytes_maybe(obj):
+    # 关键：你的固件 img.compress() 返回 Image，需要再转 bytes
+    if obj is None:
+        return None
+    if isinstance(obj, (bytes, bytearray)):
+        return obj
+    if hasattr(obj, "to_bytes"):
+        try:
+            b = obj.to_bytes()
+            if isinstance(b, (bytes, bytearray)):
+                return b
+        except Exception:
+            pass
+    if hasattr(obj, "bytearray"):
+        try:
+            b = obj.bytearray()
+            if isinstance(b, (bytes, bytearray)):
+                return b
+        except Exception:
+            pass
+    return None
 
 
-def _img_to_rgb565_bytes(img):
-    # Most MaixPy builds for K210 support img.to_bytes() returning RGB565 for RGB565 images.
-    if hasattr(img, "to_bytes"):
-        b = img.to_bytes()
-        if isinstance(b, (bytes, bytearray)):
+def _jpeg_bytes(img, quality):
+    # 路线：img.compress -> (Image or bytes) -> bytes
+    try:
+        j = img.compress(quality=quality)
+        b = _to_bytes_maybe(j)
+        if b and len(b) > 200:
             return b
-    if hasattr(img, "bytearray"):
-        b = img.bytearray()
-        if isinstance(b, (bytes, bytearray)):
+    except Exception as e:
+        print("[JPEG] compress fail:", e)
+
+    # 兼容另一些固件：img.compressed
+    try:
+        j = img.compressed(quality=quality)
+        b = _to_bytes_maybe(j)
+        if b and len(b) > 200:
             return b
-    raise Exception("Image->RAW bytes not supported (need img.to_bytes/bytearray)")
+    except Exception as e:
+        print("[JPEG] compressed fail:", e)
+
+    raise Exception("JPEG encode returned non-bytes Image (cannot extract bytes)")
 
 
-def _sendall_chunked(sock, data, chunk=1024):
-    # chunked send to avoid EIO on ESP32_SPI soft stack
-    mv = memoryview(data)
-    n = len(mv)
-    off = 0
-    while off < n:
-        end = off + chunk
-        if end > n:
-            end = n
-        sock.send(mv[off:end])
-        off = end
-
-
-def http_post_raw_rgb565(host, port, path, raw_bytes, w, h, frame_id=None):
+def http_post_jpeg(host, port, path, jpeg_bytes, frame_id=None, timeout_s=10, retry=1):
     import usocket as socket
 
-    if not isinstance(raw_bytes, (bytes, bytearray)):
-        raise Exception("raw must be bytes/bytearray")
-    addr = socket.getaddrinfo(host, port)[0][-1]
-    s = socket.socket()
-    s.settimeout(10)
-
-    try:
+    def _once():
+        addr = socket.getaddrinfo(host, port)[0][-1]
+        s = socket.socket()
+        s.settimeout(timeout_s)
         s.connect(addr)
 
         hdr = ""
         hdr += "POST %s HTTP/1.1\r\n" % path
         hdr += "Host: %s:%d\r\n" % (host, port)
-        hdr += "Content-Type: application/octet-stream\r\n"
-        hdr += "Content-Length: %d\r\n" % len(raw_bytes)
+        hdr += "Content-Type: image/jpeg\r\n"
+        hdr += "Content-Length: %d\r\n" % len(jpeg_bytes)
         hdr += "Connection: close\r\n"
-        hdr += "X-Pix: RGB565\r\n"
-        hdr += "X-W: %d\r\n" % int(w)
-        hdr += "X-H: %d\r\n" % int(h)
         if frame_id is not None and getattr(config, "SEND_FRAME_ID", True):
             hdr += "X-Frame-Id: %s\r\n" % str(frame_id)
         hdr += "\r\n"
 
         s.send(hdr.encode())
-        _sendall_chunked(s, raw_bytes, chunk=int(getattr(config, "SEND_CHUNK", 1024)))
-
+        s.send(jpeg_bytes)
         resp = s.recv(96)
-        ok = (b" 200 " in resp) or (b" 201 " in resp)
         s.close()
-        return ok, resp
+        return (b" 201 " in resp) or (b" 200 " in resp)
+
+    try:
+        if _once():
+            return True
     except Exception as e:
+        last = e
+    else:
+        last = Exception("HTTP not 200/201")
+
+    for _ in range(int(retry)):
+        time.sleep_ms(60)
         try:
-            s.close()
-        except Exception:
-            pass
-        raise e
+            if _once():
+                return True
+        except Exception as e:
+            last = e
+
+    raise last
 
 
 def main():
     time.sleep_ms(350)
-    print("=== MaixPy Stereo LCD + WiFi Stream (RAW RGB565) ===")
+    print("=== MaixPy Stereo LCD + WiFi Stream (JPEG QVGA) ===")
 
     if getattr(config, "USE_LCD", True):
         init_lcd()
 
-    try:
-        init_binocular()
-    except Exception as e:
-        print("[CAM] init failed:", e)
-        lcd_msg("CAM INIT ERR", 24)
-        while True:
-            time.sleep_ms(1000)
-
-    time.sleep_ms(800)
+    init_binocular()
 
     nic = None
     if getattr(config, "WIFI_ENABLE", True):
         nic = wifi_connect()
-        if nic is None:
-            lcd_msg("WIFI FAIL", 24)
-        else:
-            lcd_msg("WIFI OK", 24)
+        lcd_msg("WIFI OK" if nic else "WIFI FAIL", 24)
 
-    host = port = None
-    if nic is not None:
+    host = port = base_path = None
+    if nic:
+        host, port, base_path = _parse_http_url(
+            getattr(config, "SERVER_URL", "").strip()
+        )
+        if base_path == "/" or base_path == "":
+            base_path = "/upload"
+        if base_path.endswith("/"):
+            base_path = base_path[:-1]
+
         try:
-            host, port = _server_base()
-            probe_url = "http://%s:%d/ping" % (host, port)
-            resp = http_get_raw(probe_url)
+            resp = http_get_raw("http://%s:%d/ping" % (host, port))
             print("[PROBE] resp:", resp)
-            lcd_msg("PING OK" if b"200" in resp else "PING BAD", 24)
         except Exception as e:
             print("[PROBE] failed:", e)
-            lcd_msg("PING FAIL", 24)
-            host = port = None
+
+    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 300))
+    switch_ms = int(getattr(config, "SWITCH_MS", 40))
+    q = int(getattr(config, "JPEG_QUALITY", 60))
+    retry = int(getattr(config, "HTTP_RETRY", 1))
+    timeout_s = int(getattr(config, "SOCKET_TIMEOUT", 10))
 
     frame_id = 0
     last_send = time.ticks_ms()
 
-    # IMPORTANT: slow down by default (soft spi + big payload)
-    interval_ms = int(getattr(config, "STREAM_INTERVAL_MS", 1800))
-    switch_ms = int(getattr(config, "SWITCH_MS", 120))
-
-    # EIO backoff / reconnect
-    consecutive_fail = 0
-    fail_reconnect_n = int(getattr(config, "FAIL_RECONNECT_N", 4))
-
     while True:
+        imgL = capture_left()
+        if lcd_ok():
+            lcd.display(imgL)
+            lcd_msg("L", 0)
+        time.sleep_ms(switch_ms)
+
+        imgR = capture_right()
+        if lcd_ok():
+            lcd.display(imgR)
+            lcd_msg("R", 0)
+        time.sleep_ms(switch_ms)
+
+        if not nic or not host:
+            continue
+
+        now = time.ticks_ms()
+        if time.ticks_diff(now, last_send) < interval_ms:
+            continue
+        last_send = now
+
+        okL = okR = False
+        bytesL = bytesR = -1
+
         try:
-            imgL = capture_left()
-            if lcd_ok():
-                lcd.display(imgL)
-                lcd_msg("L", 0)
-            time.sleep_ms(switch_ms)
-
-            imgR = capture_right()
-            if lcd_ok():
-                lcd.display(imgR)
-                lcd_msg("R", 0)
-            time.sleep_ms(switch_ms)
-
-            if nic is None or host is None:
-                time.sleep_ms(300)
-                continue
-
-            now = time.ticks_ms()
-            if time.ticks_diff(now, last_send) < interval_ms:
-                continue
-            last_send = now
-
             gc.collect()
-
-            okL = okR = False
-            bytesL = bytesR = -1
-
-            # LEFT
-            try:
-                rawL = _img_to_rgb565_bytes(imgL)
-                bytesL = len(rawL)
-                okL, _ = http_post_raw_rgb565(
-                    host,
-                    port,
-                    "/upload_raw/L",
-                    rawL,
-                    imgL.width(),
-                    imgL.height(),
-                    frame_id=str(frame_id) + "L",
-                )
-            except Exception as e:
-                print("[HTTP] L failed:", e)
-                okL = False
-
-            gc.collect()
-            time.sleep_ms(60)
-
-            # RIGHT
-            try:
-                rawR = _img_to_rgb565_bytes(imgR)
-                bytesR = len(rawR)
-                okR, _ = http_post_raw_rgb565(
-                    host,
-                    port,
-                    "/upload_raw/R",
-                    rawR,
-                    imgR.width(),
-                    imgR.height(),
-                    frame_id=str(frame_id) + "R",
-                )
-            except Exception as e:
-                print("[HTTP] R failed:", e)
-                okR = False
-
-            frame_id += 1
-            print(
-                "[TX] frame=%d okL=%s okR=%s bytesL=%d bytesR=%d"
-                % (frame_id, okL, okR, bytesL, bytesR)
+            jpegL = _jpeg_bytes(imgL, q)
+            bytesL = len(jpegL)
+            okL = http_post_jpeg(
+                host,
+                port,
+                base_path + "/L",
+                jpegL,
+                frame_id="%dL" % frame_id,
+                timeout_s=timeout_s,
+                retry=retry,
             )
-
-            if lcd_ok():
-                lcd_msg("TX %d" % frame_id, 12)
-                if (not okL) or (not okR):
-                    lcd_msg("HTTP ERR", 24)
-
-            # handle failures
-            if okL and okR:
-                consecutive_fail = 0
-            else:
-                consecutive_fail += 1
-                # backoff to avoid hammering ESP32 stack
-                time.sleep_ms(800 + 300 * consecutive_fail)
-
-                if consecutive_fail >= fail_reconnect_n:
-                    print("[WIFI] too many fails -> reconnect wifi")
-                    consecutive_fail = 0
-                    try:
-                        nic = wifi_connect()
-                        if nic is not None:
-                            host, port = _server_base()
-                            probe_url = "http://%s:%d/ping" % (host, port)
-                            resp = http_get_raw(probe_url)
-                            print("[PROBE] resp:", resp)
-                    except Exception as e:
-                        print("[WIFI] reconnect failed:", e)
-                        nic = None
-                        host = port = None
-
         except Exception as e:
-            print("[LOOP] error:", e)
-            if lcd_ok():
-                lcd_msg("LOOP ERR", 24)
-            time.sleep_ms(400)
-            try:
-                init_binocular(warmup_pairs=6)
-                if lcd_ok():
-                    lcd_msg("RECOVER OK", 24)
-            except Exception:
-                pass
+            print("[HTTP] L failed:", e)
+
+        try:
+            gc.collect()
+            jpegR = _jpeg_bytes(imgR, q)
+            bytesR = len(jpegR)
+            okR = http_post_jpeg(
+                host,
+                port,
+                base_path + "/R",
+                jpegR,
+                frame_id="%dR" % frame_id,
+                timeout_s=timeout_s,
+                retry=retry,
+            )
+        except Exception as e:
+            print("[HTTP] R failed:", e)
+
+        frame_id += 1
+        print(
+            "[TX] frame=%d okL=%s okR=%s bytesL=%d bytesR=%d"
+            % (frame_id, okL, okR, bytesL, bytesR)
+        )
 
 
 if __name__ == "__main__":
