@@ -33,8 +33,22 @@ SEND_FRAME_ID = True
 
 # If your firmware supports auto ESP32 init, you can ignore these.
 ESP32_SPI = {
-    "fpioa": {"cs": 25, "rst": 8, "rdy": 9, "mosi": 28, "miso": 26, "sclk": 27},
-    "gpiohs": {"cs": 0, "rst": 1, "rdy": 2, "mosi": 3, "miso": 4, "sclk": 5},
-    "spi": -1,
+    "fpioa": {
+        "cs": 25,
+        "rst": 8,
+        "rdy": 9,
+        "mosi": 28,
+        "miso": 26,
+        "sclk": 27,
+    },
+    "gpiohs": {
+        "cs": 0,
+        "rst": 1,
+        "rdy": 2,
+        "mosi": 3,
+        "miso": 4,
+        "sclk": 5,
+    },
+    "spi": 1,  # 🔥 强制硬 SPI0
     "timeout_ms": 20000,
 }
